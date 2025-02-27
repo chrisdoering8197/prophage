@@ -4,8 +4,6 @@ import sys
 import argparse
 import pandas as pd
 import numpy as np
-import networkx as nx
-import shutil
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -13,9 +11,7 @@ from collections import defaultdict
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import multiprocessing
-import seaborn as sns
 import matplotlib.pyplot as plt
-from dna_features_viewer import BiopythonTranslator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
@@ -26,23 +22,34 @@ from matplotlib.backends.backend_pdf import PdfPages
 HOME = os.path.expandvars('$HOME')
 sys.path.append(os.path.join(HOME,'hotspots/'))
 from HelperFunctions import *
-                
-TMPDIR = os.path.expandvars('$TMPDIR')
-CPU_AVAIL = multiprocessing.cpu_count()
 
-def hhpred(file,DBs):
+def hhpred(file,DBs,hhsuite_dbs,transfer_dbs=True):
     basename, ext = os.path.splitext(file)
     a3m = basename+'.a3m'
-    if ext == '.a2m':
-        hhblits_cmd = ['conda run -n HHsuiteEnv','hhblits','-o','/dev/null',
-                   '-i',file,'-M a2m','-d',os.path.join(TMPDIR,'UniRef30_2019_11'),
-                   '-oa3m',a3m,'-cpu','2','-n','2','-v','1']
-        os.system(' '.join(hhblits_cmd))
-    if ext == '.faa':
-        hhblits_cmd = ['conda run -n HHsuiteEnv','hhblits','-o','/dev/null',
-           '-i',file,'-d',os.path.join(TMPDIR,'UniRef30_2019_11'),
-           '-oa3m',a3m,'-cpu','2','-n','2','-v','1']
-        os.system(' '.join(hhblits_cmd))
+    if ext != '.a2m' and ext != '.faa':
+        raise ValueError('Input file must be in either a2m or fasta format')
+    if transfer_dbs:
+        if ext == '.a2m':
+            hhblits_cmd = ['conda run -n HHsuiteEnv','hhblits','-o','/dev/null',
+                    '-i',file,'-M a2m','-d',os.path.join(TMPDIR,'UniRef30_2019_11'),
+                    '-oa3m',a3m,'-cpu','2','-n','2','-v','1']
+            os.system(' '.join(hhblits_cmd))
+        if ext == '.faa':
+            hhblits_cmd = ['conda run -n HHsuiteEnv','hhblits','-o','/dev/null',
+            '-i',file,'-d',os.path.join(TMPDIR,'UniRef30_2019_11'),
+            '-oa3m',a3m,'-cpu','2','-n','2','-v','1']
+            os.system(' '.join(hhblits_cmd))
+    else:
+        if ext == '.a2m':
+            hhblits_cmd = ['conda run -n HHsuiteEnv','hhblits','-o','/dev/null',
+                    '-i',file,'-M a2m','-d',os.path.join(hhsuite_dbs,'UniRef30_2019_11'),
+                    '-oa3m',a3m,'-cpu','2','-n','2','-v','1']
+            os.system(' '.join(hhblits_cmd))
+        if ext == '.faa':
+            hhblits_cmd = ['conda run -n HHsuiteEnv','hhblits','-o','/dev/null',
+            '-i',file,'-d',os.path.join(hhsuite_dbs,'UniRef30_2019_11'),
+            '-oa3m',a3m,'-cpu','2','-n','2','-v','1']
+            os.system(' '.join(hhblits_cmd))
     hhr_out = basename+'.hhr'
     hhsearch_cmd = ['conda run -n HHsuiteEnv','hhsearch','-i',a3m,'-o',hhr_out,'-v','1']
     dbcommand = ' '.join([f'-d {db}' for db in DBs])
@@ -51,13 +58,15 @@ def hhpred(file,DBs):
     
 
 def hotspot_proteins(out_folder,protein_file,defenseDF,anno_dict,clust_dict,mem2rep,
-                     protein1,protein2,max_distance,hhpred_prob_cutoff,show_clusters,dbs2search):
+                     protein1,protein2,max_distance,hhpred_prob_cutoff,show_clusters,dbs2search,transfer_dbs,hhsuite_dbs):
+    #Get all homologs of each protein and check for overlap in genomes using Prodigal naming convention
     prot1_homologs = clust_dict[mem2rep[protein1]]
     prot1_genomes = {'_'.join(prot.split('_')[:-1]) for prot in prot1_homologs}
     prot2_homologs = clust_dict[mem2rep[protein2]]
     prot2_genomes = {'_'.join(prot.split('_')[:-1]) for prot in prot2_homologs}
     covered_genomes = prot1_genomes.intersection(prot2_genomes)
     
+    #Check genomes for hotspots at least max_distance apart
     hotspots = []
     for phage_genome in covered_genomes:
         prot1_hits = {prot for prot in prot1_homologs if phage_genome == '_'.join(prot.split('_')[:-1])}
@@ -72,18 +81,14 @@ def hotspot_proteins(out_folder,protein_file,defenseDF,anno_dict,clust_dict,mem2
         if potential_hotspots:
             smallest_hotspot = min(potential_hotspots,key=len)
             hotspots.append((phage_genome,smallest_hotspot))
-                
+            
+    #Save DefenseFinder and Pharokka annotations in dataframe for hotspots
     hotspots_with_reps = [(phage_genome,hotspot,[mem2rep[prot] for prot in hotspot]) for phage_genome,hotspot in hotspots]
     hotspotDF = pd.DataFrame(hotspots_with_reps,columns=['Genome','Hotspot Proteins','RepSeq Hotspot Proteins'])
-    hotspotDF['DefenseFinder Proteins'] = None
-    defense_dict = {row['hit_id']:row['gene_name'] for _, row in defenseDF.iterrows()}
-    hotspotDF['Protein Class'] = None
-    for index, row in hotspotDF.iterrows():
-        anno_classes = [anno_dict[prot] for prot in row['RepSeq Hotspot Proteins']]
-        hotspotDF.at[index,'Protein Class'] = [anno_classes]
-        
-        defense_genes = [defense_dict.get(prot,'') for prot in row['RepSeq Hotspot Proteins']]
-        hotspotDF.at[index,'DefenseFinder Proteins'] = [defense_genes]
+
+    defense_dict = dict(defenseDF[['hit_id', 'gene_name']].values)
+    hotspotDF['DefenseFinder Proteins'] = hotspotDF['RepSeq Hotspot Proteins'].apply(lambda prot_list: [defense_dict.get(prot,'') for prot in prot_list])
+    hotspotDF['Protein Class'] = hotspotDF['RepSeq Hotspot Proteins'].apply(lambda prot_list: [anno_dict[prot] for prot in prot_list])
     
     #HHpred annotation of protein clusters in hotspot
     clusters2annotate = set([item for sublist in hotspotDF['RepSeq Hotspot Proteins'] for item in sublist])
@@ -104,7 +109,7 @@ def hotspot_proteins(out_folder,protein_file,defenseDF,anno_dict,clust_dict,mem2
         if len(clust_seqs) > 1:
             a2m_file_name = os.path.join(hhpred_folder,f'cluster_{i}.a2m')
             if not os.path.isfile(a2m_file_name):
-                clustalo = ['clustalo','-i',clust_file_name,'-o',a2m_file_name,'--outfmt','a2m','--threads',str(CPU_AVAIL)]
+                clustalo = ['conda run -n MyEnv','clustalo','-i',clust_file_name,'-o',a2m_file_name,'--outfmt','a2m','--threads',str(CPU_AVAIL)]
                 os.system(' '.join(clustalo))
             files4hhpred.append(a2m_file_name)
         else:
@@ -116,25 +121,25 @@ def hotspot_proteins(out_folder,protein_file,defenseDF,anno_dict,clust_dict,mem2
     if files4hhpred:
 
         #Transfer UniRef database to temporary directory
-        if 'UniRef30_2019_11_a3m.ffdata' not in os.listdir(TMPDIR):
-            print('Transferring the Uniclust database to local filesystem')
-            os.system('cp -r ~/LaubLab_shared/hhsuite_dbs/UniRef30_2019* $TMPDIR')
-            os.system('chmod a+r $TMPDIR/UniRef30_2019*')
+        if 'UniRef30_2019_11_a3m.ffdata' not in os.listdir(TMPDIR) and transfer_dbs:
+            print('Transferring the Uniclust database to temporary filesystem')
+            os.system(f'cp -r {os.path.join(hhsuite_dbs,'UniRef30_2019*')} {TMPDIR}')
+            os.system(f'chmod a+r {os.path.join(TMPDIR,'UniRef30_2019*')}')
 
 
         #Search against databases with hhpred
-        db_locs = {'pfam': '~/LaubLab_shared/hhsuite_dbs/pfam',
-           'innate':'~/LaubLab_shared/hhsuite_dbs/innate',
-           'defense':'~/LaubLab_shared/hhsuite_dbs/df',
-           'CD':'~/LaubLab_shared/hhsuite_dbs/NCBI_CD',
-           'pdb':'~/LaubLab_shared/hhsuite_dbs/pdb70',
-           'uniref': '~/LaubLab_shared/hhsuite_dbs/UniRef30_2019_11'}
+        db_locs = {'pfam':os.path.join(hhsuite_dbs,'pfam'),
+           'innate':os.path.join(hhsuite_dbs,'innate'),
+           'defense':os.path.join(hhsuite_dbs,'df'),
+           'CD':os.path.join(hhsuite_dbs,'NCBI_CD'),
+           'pdb':os.path.join(hhsuite_dbs,'pdb70'),
+           'uniref': os.path.join(hhsuite_dbs,'UniRef30_2019_11')}
         DBs = [db_locs[db] for db in dbs2search]
 
         #Run hhsearch on fasta alignment files
         print('Running HHpred annotations')
         n_jobs = int(CPU_AVAIL/2)
-        _ = Parallel(n_jobs=n_jobs)(delayed(hhpred) (afa_file, DBs) for afa_file in tqdm(files4hhpred))
+        _ = Parallel(n_jobs=n_jobs)(delayed(hhpred) (afa_file, DBs,hhsuite_dbs,transfer_dbs) for afa_file in tqdm(files4hhpred))
     
     #Compile hhearch results into single dataframe
     hhr_files = glob.glob(os.path.join(hhpred_folder,'*.hhr'))
@@ -217,30 +222,27 @@ def hotspot_proteins(out_folder,protein_file,defenseDF,anno_dict,clust_dict,mem2
         top_hotspot_DF = pd.concat(top_hotspot_DF,ignore_index=True)
         top_hotspot_DF.to_csv(os.path.join(hhpred_folder,f'{protein1}_{protein2}_top_hotspots.txt'),sep='\t')
         
-
-                   
     hotspotDF.to_csv(os.path.join(out_folder,f'{protein1}_{protein2}_hotspot_summary.txt'),sep='\t')
 
         
 
 def hotspot_analysis(protein1,protein2,in_clusters,in_proteins,out_folder,anno_file,defense_file,
-                 max_distance,hhpred_prob_cutoff,show_clusters,run_hhpred,dbs2search):
+                 max_distance,hhpred_prob_cutoff,show_clusters,dbs2search,transfer_dbs,hhsuite_dbs):
     #Create out_folder if needed
     if not os.path.isdir(out_folder):
         os.makedirs(out_folder)
         
-    
     #Read in pharokka and DefenseFinder annotations
     if anno_file:
         print('Reading in annotations...')
         annotations = pd.read_csv(anno_file,sep='\t',usecols=['ID','phrog','annot','category','vfdb_hit','CARD_hit'])
-        annotations['vfdb_hit'] = annotations['vfdb_hit'].apply(lambda x: None if str(x).lower() == 'nan' else x)
-        annotations['CARD_hit'] = annotations['CARD_hit'].apply(lambda x: None if str(x).lower() == 'nan' else x)
+        annotations['vfdb_hit'] = annotations['vfdb_hit'].replace({np.nan:None,'None':None})
+        annotations['CARD_hit'] = annotations['CARD_hit'].replace({np.nan:None,'None':None})
         anno_dict = {}
         for index, row in annotations.iterrows():
-            if row['CARD_hit'] != 'None':
+            if row['CARD_hit']:
                 anno_dict[row['ID']] = 'AMR'
-            if row['vfdb_hit'] != 'None':
+            if row['vfdb_hit']:
                 anno_dict[row['ID']] = 'virulence'
             else:
                 anno_dict[row['ID']] = row['category']
@@ -253,21 +255,13 @@ def hotspot_analysis(protein1,protein2,in_clusters,in_proteins,out_folder,anno_f
     #Get protein cluster information into dictionary format
     print('Reading in cluster information...')
     protein_df = pd.read_csv(in_clusters,sep='\t',names=['rep_seq','member'])
-    protein_clusts = defaultdict(set)
-    for index, row in protein_df.iterrows():
-        protein_clusts[row['rep_seq']].add(row['member'])
+    protein_clusts = protein_df.groupby('rep_seq')['member'].apply(set).to_dict()
         
-    
-    #Dictionary to get representative sequence from member proteins            
-    mem2rep = {}
-    for rep_seq, member_set in protein_clusts.items():
-        for member in member_set:
-            mem2rep[member] = rep_seq
-        
+    #Dictionary to get representative sequence from member proteins
+    mem2rep = dict(protein_df[['member','rep_seq']].values)        
 
-    if protein2 and run_hhpred:
-        hotspot_proteins(out_folder,in_proteins,defense,anno_dict,protein_clusts,mem2rep,
-                         protein1,protein2,max_distance,hhpred_prob_cutoff,show_clusters,dbs2search)
+    hotspot_proteins(out_folder,in_proteins,defense,anno_dict,protein_clusts,mem2rep,
+                        protein1,protein2,max_distance,hhpred_prob_cutoff,show_clusters,dbs2search,transfer_dbs,hhsuite_dbs)
     
 
 
@@ -284,12 +278,22 @@ if __name__ == "__main__":
     parser.add_argument('--max_distance', type=int, default=15, help='Maximum hotspot size to consider.')
     parser.add_argument('--hhpred_prob_cutoff', type=float, default=0.5, help='Probability cutoff for display of hhpred domain predictions.')
     parser.add_argument('--show_clusters', type=int, default=20, help='Number of top hhpred cluster results to show.')
-    parser.add_argument('--no_hhpred',action='store_false',help='If flag given will not run hhpred annotation of proteins.')
     parser.add_argument('-d','--databases',nargs='*',
                     default=['pfam','innate','defense','CD','pdb'],
                     choices=['pfam','innate','defense','CD','pdb','uniref'],
                     help='Databases with which to perform hhsearch.')
-
+    
+    demo_vars = parser.add_argument_group('Demo Variables',description='Variables used when running demonstration or not on SuperCloud system')
+    demo_vars.add_argument('--TMPDIR',type=str,default=os.path.expandvars('$TMPDIR'),help='Temporary directory for running hhsearch')
+    demo_vars.add_argument('--CPU_AVAIL',type=int,default=multiprocessing.cpu_count(),help='Number of CPUs available for running hhsearch')
+    demo_vars.add_argument('--hhsuite_dbs',type=str,default=os.path.expandvars('$HOME/LaubLab_shared/hhsuite_dbs/'),help='Directory containing hhsuite databases')
+    demo_vars.add_argument('--transfer_dbs',action='store_true',help='Transfer databases to local filesystem for faster searching. Set to false if running locally.')
 
     args = parser.parse_args()
-    hotspot_analysis(args.protein1,args.protein2,args.in_clusters,args.in_proteins,args.out_folder,args.anno_file,args.defense_file,args.max_distance,args.hhpred_prob_cutoff,args.show_clusters,args.no_hhpred,args.databases)
+
+    global TMPDIR, CPU_AVAIL
+    TMPDIR = args.TMPDIR
+    CPU_AVAIL = args.CPU_AVAIL
+
+    hotspot_analysis(args.protein1,args.protein2,args.in_clusters,args.in_proteins,args.out_folder,args.anno_file,
+                     args.defense_file,args.max_distance,args.hhpred_prob_cutoff,args.show_clusters,args.databases,args.transfer_dbs,args.hhsuite_dbs)

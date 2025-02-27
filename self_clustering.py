@@ -9,11 +9,9 @@ from matplotlib.colors import Normalize
 from joblib import Parallel,delayed
 from tqdm import tqdm
 import graph_tool.all as gt
-HOME = os.path.expandvars('$HOME')+'/'
-THREADS=48
-SMALLEST_GRAPH = 100
 
-def self_cluster(out_name,out_folder,in_protein,in_genome,gene2genome_file,TMPDIR):
+def self_cluster(out_name,out_folder,in_protein,in_genome,gene2genome_file,TMPDIR,SMALLEST_GRAPH,THREADS,total_PC=None,total_genomes=None):
+    print('Clustering phage proteins...')
     prot_clust_tsv = os.path.join(out_folder,f'{out_name}_proteins_cluster.tsv')
     if not os.path.isfile(prot_clust_tsv):
         #Cluster all phage proteins at 25% identity and 80% coverage
@@ -29,7 +27,7 @@ def self_cluster(out_name,out_folder,in_protein,in_genome,gene2genome_file,TMPDI
     rep2mem = prot_clustDF.groupby('rep_seq')['member'].apply(list).to_dict()
     protclust_sizes = prot_clustDF['rep_seq'].value_counts().to_dict()
 
-    print('Loading needed tables...')
+    print('Strictly clustering phage genomes...')
     #Cluster phage genomes strictly based on DNA similarity
     phage_genome_clu_tsv = os.path.join(out_folder,f'{out_name}_cluster.tsv')
     if not os.path.isfile(phage_genome_clu_tsv):
@@ -43,7 +41,7 @@ def self_cluster(out_name,out_folder,in_protein,in_genome,gene2genome_file,TMPDI
     #Read strict DNA clustering in as dictionary
     phage_genome_clu = pd.read_csv(phage_genome_clu_tsv,sep='\t',names=['rep_genome','mem_genome'])
     phage_genome_clu = phage_genome_clu.groupby('rep_genome')['mem_genome'].count().to_dict()
-    total_genomes = len(phage_genome_clu)
+
 
     gene2genomeDF = pd.read_csv(gene2genome_file)
     genome2gene = gene2genomeDF.groupby('contig_id')['protein_id'].apply(list).to_dict()
@@ -70,7 +68,10 @@ def self_cluster(out_name,out_folder,in_protein,in_genome,gene2genome_file,TMPDI
         return edges
 
     #P-value threshold set following those used in vcontact2
-    total_PC = len(set(prot_clustDF['rep_seq']))
+    if not total_PC:
+        total_PC = len(set(prot_clustDF['rep_seq']))
+    if not total_genomes:
+        total_genomes = len(phage_genome_clu)
     pairwise_comparisons = (total_genomes *(total_genomes-1))/2 #Includes all genomes included those filtered at DNA similarity level
     pval_threshold = 0.1/pairwise_comparisons
 
@@ -187,6 +188,12 @@ if __name__ == "__main__":
     parser.add_argument('in_genomes', type=str, help='Path to file containing all phage DNA genomes')
     parser.add_argument('gene2genome_file', type=str, help='Path to file containing gene to genome mapping. Proteins much be present in the first column with corresponding genome in the second.')
     parser.add_argument('--TMPDIR', type=str, default=os.path.expandvars('$TMPDIR'), help='Path to temporary directory')
+    parser.add_argument('--smallest_graph', type=int, default=100, help='Smallest subgraph size to consider')
+    parser.add_argument('--threads', type=int, default=48, help='Number of threads to use for PC calculation')
+
+    demo_group = parser.add_argument_group('Demo Variables',description='Variables used for demonstration on a reduced dataset. Needed to calculate p-value thresholds if full dataset is not provided, else inferred from data.')
+    demo_group.add_argument('--total_PC', type=int, help='Total number of protein clusters in dataset')
+    demo_group.add_argument('--total_genomes', type=int, help='Total number of phage genomes in dataset')
 
     args = parser.parse_args()
-    self_cluster(args.out_name,args.out_folder,args.in_protein,args.in_genome,args.gene2genome_file,args.TMPDIR)
+    self_cluster(args.out_name,args.out_folder,args.in_protein,args.in_genome,args.gene2genome_file,args.TMPDIR,args.smallest_graph,args.threads,args.total_PC,args.total_genomes)
